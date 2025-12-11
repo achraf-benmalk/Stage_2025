@@ -48,15 +48,17 @@ class SUEZExperimentalData:
 
     def __post_init__(self):
         # H2O control experiment (physical aging only)
+        # Raw values minus 20 min "time under azote" correction from original code.ipynb
         self.times_h2o = np.array([0, 1, 2, 3, 4, 9])
-        self.oit_h2o = np.array([271.07, 255.26, 241.62, 222.38, 204.25, 161.62])
+        self.oit_h2o = np.array([271.07, 267.95, 258.70, 253.00, 248.03, 229.30])
 
         # HOCl exposure experiment (0.05 ppm)
+        # Raw values minus 20 min "time under azote" correction from original code.ipynb
         self.times_hocl = np.array([0, 1, 2, 3, 4, 6, 9])
-        self.oit_hocl = np.array([271.07, 126.81, 61.36, 32.33, 23.82, 11.67, 9.09])
+        self.oit_hocl = np.array([271.07, 126.81, 61.44, 32.29, 23.82, 19.06, 9.07])
 
-        # Note: Initial value differs slightly - using average
-        self.ti0_oit = 291.07  # From initial measurement before any aging
+        # Initial OIT before any aging (measured value)
+        self.ti0_oit = 291.07
 
     @staticmethod
     def get_instance():
