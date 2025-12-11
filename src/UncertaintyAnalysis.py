@@ -87,26 +87,26 @@ def create_default_parameter_distributions() -> List[ParameterDistribution]:
     """
     Create default parameter distributions based on Colin et al. uncertainty estimates.
 
+    Parameters are represented as SCALE FACTORS centered around 1.0.
+    A scale factor of 1.0 means nominal value, 0.5 means half, 2.0 means double.
+
+    Conservative ranges to ensure numerical stability.
+
     Returns:
-        List of ParameterDistribution objects
+        List of ParameterDistribution objects (scale factors)
     """
     return [
-        # Kinetic rate constants (typically 20-50% uncertainty)
-        ParameterDistribution('k1d', 2.0e-3, 'lognormal', cv=0.3),  # DOC initiation
-        ParameterDistribution('k1u', 4.0e-11, 'lognormal', cv=0.5),  # POOH unimolecular
-        ParameterDistribution('k1b', 2.5e-7, 'lognormal', cv=0.5),  # POOH bimolecular
-        ParameterDistribution('k2', 1.0e8, 'lognormal', cv=0.2),  # P + O2
-        ParameterDistribution('k3', 1.4e-3, 'lognormal', cv=0.3),  # PO2 + PH
-        ParameterDistribution('k7', 1.5e5, 'lognormal', cv=0.3),  # AH stabilization
+        # Most sensitive kinetic parameters (conservative uncertainty)
+        ParameterDistribution('k1d', 1.0, 'uniform', bounds=(0.7, 1.4)),   # DOC initiation ±30%
+        ParameterDistribution('k3', 1.0, 'uniform', bounds=(0.8, 1.25)),   # Propagation ±20%
+        ParameterDistribution('k7', 1.0, 'uniform', bounds=(0.7, 1.4)),    # AH stabilization ±30%
 
-        # Diffusion coefficients (typically 30-50% uncertainty)
-        ParameterDistribution('D_O2', 2.5e-11, 'lognormal', cv=0.3),
-        ParameterDistribution('D_DOC', 3.0e-11, 'lognormal', cv=0.3),
-        ParameterDistribution('D_AH', 1.0e-14, 'lognormal', cv=0.5),
+        # Diffusion coefficients (bounded for stability)
+        ParameterDistribution('D_O2', 1.0, 'uniform', bounds=(0.8, 1.25)),
+        ParameterDistribution('D_DOC', 1.0, 'uniform', bounds=(0.7, 1.4)),
 
-        # Initial concentrations (typically 10-20% uncertainty)
-        ParameterDistribution('AH0', 5.0e-2, 'normal', cv=0.15),  # mol/L
-        ParameterDistribution('POOH0', 1.0e-4, 'lognormal', cv=0.5),  # mol/L
+        # Initial concentrations (well-characterized)
+        ParameterDistribution('AH0', 1.0, 'uniform', bounds=(0.85, 1.15)),
     ]
 
 
@@ -182,42 +182,54 @@ class MonteCarloAnalysis:
         """
         Create a model with modified parameters.
 
+        The model uses:
+        - k_coeffs: dict of (Ea, A0) tuples for rate constants
+        - D_coeffs: dict of (Ea, D0) tuples for diffusion coefficients
+        - AH0_conc, POOH0_conc: initial concentrations
+
+        We vary the pre-exponential factors (A0) to represent parameter uncertainty.
+
         Args:
-            param_values: Array of parameter values
+            param_values: Array of parameter values (scale factors)
 
         Returns:
             Modified DegradationModel
         """
         model = create_suez_film_model()
 
-        # Map parameters to model attributes
-        param_map = {
-            'k1d': ('kinetics', 'k1d'),
-            'k1u': ('kinetics', 'k1u'),
-            'k1b': ('kinetics', 'k1b'),
-            'k2': ('kinetics', 'k2'),
-            'k3': ('kinetics', 'k3'),
-            'k7': ('kinetics', 'k7'),
-            'D_O2': ('material', 'D_O2'),
-            'D_DOC': ('material', 'D_DOC'),
-            'D_AH': ('material', 'D_AH'),
-            'AH0': ('material', 'AH0'),
-            'POOH0': ('material', 'POOH0'),
-        }
-
+        # Map parameter names to model structure
         for i, param in enumerate(self.config.parameters):
-            if param.name in param_map:
-                attr_type, attr_name = param_map[param.name]
-                if attr_type == 'kinetics':
-                    setattr(model.kinetics, attr_name, param_values[i])
-                elif attr_type == 'material':
-                    setattr(model.material, attr_name, param_values[i])
+            scale_factor = param_values[i]
+
+            # Kinetic rate constants - modify pre-exponential factor A0
+            if param.name in model.k_coeffs:
+                Ea, A0 = model.k_coeffs[param.name]
+                model.k_coeffs[param.name] = (Ea, A0 * scale_factor)
+
+            # Diffusion coefficients - modify pre-exponential D0
+            elif param.name == 'D_O2':
+                Ea, D0 = model.D_coeffs['O2']
+                model.D_coeffs['O2'] = (Ea, D0 * scale_factor)
+            elif param.name == 'D_DOC':
+                Ea, D0 = model.D_coeffs['DOC']
+                model.D_coeffs['DOC'] = (Ea, D0 * scale_factor)
+            elif param.name == 'D_AH':
+                Ea, D0 = model.D_coeffs['AH']
+                model.D_coeffs['AH'] = (Ea, D0 * scale_factor)
+
+            # Initial concentrations - directly modify
+            elif param.name == 'AH0':
+                model.AH0_conc = model.AH0_conc * scale_factor
+            elif param.name == 'POOH0':
+                model.POOH0_conc = model.POOH0_conc * scale_factor
 
         return model
 
     def run_simulation(self, sample_idx: int) -> Tuple[np.ndarray, np.ndarray, bool]:
         """
         Run a single simulation with sampled parameters.
+
+        Uses LSODA solver with loose tolerances for speed.
 
         Args:
             sample_idx: Index into samples array
@@ -228,11 +240,15 @@ class MonteCarloAnalysis:
         param_values = self.samples[sample_idx]
         model = self._create_modified_model(param_values)
 
+        # Use BDF solver (good for stiff problems) with moderate tolerances
         params = SimulationParams(
             T_celsius=self.config.T_celsius,
             DOC_ppm=self.config.DOC_ppm,
             t_end_years=self.config.t_end_years,
-            n_timepoints=self.config.n_timepoints
+            n_timepoints=30,  # Fewer output points
+            method='BDF',     # Backward differentiation formula (stiff)
+            rtol=1e-5,        # Moderate tolerance
+            atol=1e-8
         )
 
         try:
